@@ -5,27 +5,682 @@ date: "2021/12/12"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-12312312
+
+```{r}
+#first library a few packages that we will use during the practical
+#note you may need to install them first...
+library(spatstat)
+library(here)
+library(sp)
+library(rgeos)
+library(maptools)
+library(GISTools)
+library(tmap)
+library(sf)
+library(geojson)
+library(geojsonio)
+library(tmaptools)
 ```
 
-## R Markdown
-
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+```{r}
+LondonBoroughs <- st_read(here::here("Prac6_data", "ESRI", "London_Borough_Excluding_MHW.shp"))
 ```
 
-## Including Plots
+```{r}
+library(stringr)
+BoroughMap <- LondonBoroughs %>%
+  dplyr::filter(str_detect(GSS_CODE, "^E09"))%>%
+  st_transform(., 27700)
 
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+qtm(BoroughMap)
+```
+```{r}
+BluePlaques <- st_read(here::here("prac6_data",
+                                  "open-plaques-london-2018-04-08.geojson")) %>%
+  st_transform(.,27700)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r}
+summary(BluePlaques)
+```
+
+```{r}
+#plot the blue plaques in the city
+tmap_mode("plot")
+```
+
+```{r}
+tm_shape(BoroughMap) +
+  tm_polygons(col = NA, alpha = 0.5) +
+tm_shape(BluePlaques) +
+  tm_dots(col = "blue")
+```
+```{r}
+#extract the borough
+
+Harrow <- BoroughMap %>%
+  filter(., NAME=="Harrow")
+
+#Check to see that the correct borough has been pulled out
+tm_shape(Harrow) +
+  tm_polygons(col = NA, alpha = 0.5)
+```
+```{r}
+#clip the data to our single borough
+BluePlaquesSub <- BluePlaques[Harrow,]
+#check that it's worked
+tmap_mode("plot")
+```
+
+```{r}
+tm_shape(Harrow) +
+  tm_polygons(col = NA, alpha = 0.5) +
+tm_shape(BluePlaquesSub) +
+  tm_dots(col = "blue")
+```
+```{r}
+#now set a window as the borough boundary
+window <- as.owin(Harrow)
+plot(window)
+```
+
+```{r}
+#create a sp object
+BluePlaquesSub<- BluePlaquesSub %>%
+  as(., 'Spatial')
+#create a ppp object
+BluePlaquesSub.ppp <- ppp(x=BluePlaquesSub@coords[,1],
+                          y=BluePlaquesSub@coords[,2],
+                          window=window)
+```
+
+```{r}
+BluePlaquesSub@coords[,1]
+```
+
+```{r}
+BluePlaquesSub.ppp %>%
+  plot(.,pch=16,cex=0.5, 
+       main="Blue Plaques Harrow")
+```
+```{r}
+BluePlaquesSub.ppp %>%
+  density(., sigma=500) %>%
+  plot()
+```
+```{r}
+BluePlaquesSub.ppp %>%
+  density(., sigma=1000) %>%
+  plot()
+```
+```{r}
+#First plot the points
+plot(BluePlaquesSub.ppp,
+     pch=16,
+     cex=0.5, 
+     main="Blue Plaques in Harrow")
+
+#now count the points in that fall in a 6 x 6
+#grid overlaid across the windowBluePlaquesSub.ppp2<-BluePlaquesSub.ppp %>%
+BluePlaquesSub.ppp %>%
+  quadratcount(.,nx = 6, ny = 6)%>%
+    plot(., add=T, col="red")
+```
+
+```{r}
+#run the quadrat count
+Qcount <- BluePlaquesSub.ppp %>%
+  quadratcount(.,nx = 6, ny = 6) %>%
+  as.data.frame() %>%
+  dplyr::count(Var1=Freq)%>%
+  dplyr::rename(Freqquadratcount=n)
+
+
+```
+
+
+
+检查第一列中的数据类型 - 如果它是因子，我们需要将其转换为数字
+Check the data type in the first column — if it is factor, we will need to convert it to numeric
+
+
+
+```{r}
+Qcount %>% 
+  summarise_all(class)
+
+```
+
+```{r}
+sums <- Qcount %>%
+  #calculate the total blue plaques (Var * Freq)
+  mutate(total = Var1 * Freqquadratcount) %>%
+  dplyr::summarise(across(everything(), sum))%>%
+  dplyr::select(-Var1) 
+
+lambda<- Qcount%>%
+  #calculate lambda
+  mutate(total = Var1 * Freqquadratcount)%>%
+  dplyr::summarise(across(everything(), sum)) %>%
+  mutate(lambda=total/Freqquadratcount) %>%
+  dplyr::select(lambda)%>%
+  pull(lambda)
+```
+
+OK, so we now have a frequency table — next we need to calculate our expected values. The formula for calculating expected probabilities based on the Poisson distribution is:
+```{r}
+QCountTable <- Qcount %>% 
+  mutate(Pr=((lambda^Var1)*exp(-lambda))/factorial(Var1)) %>% 
+  #now calculate the expected counts based on our total number of plaques
+  #and save them to the tabl
+  mutate(Expected = (round(Pr*sums$Freqquadratcount,0)))
+
+```
+
+
+plot it
+```{r}
+plot(c(1,5),c(0,14),type="n",
+     xlab="Number of Blue Plaques (Red=Observed,Blue=Expected)",
+     ylab="Frequency of Occurances")
+points(QCountTable$Freqquadratcount,
+       col="Red",
+       type="o",
+       lwd=3)
+points(QCountTable$Expected,
+       type="o",
+       lwd=3)
+```
+
+```{r}
+teststats <- quadrat.test(BluePlaques.ppp,nx=6,ny=6)
+
+plot(BlueP)
+```
+"因此，我们可以看到，迹象表明哈罗的蓝色斑块存在一些空间图案（聚类） - 至少对于这个特定的网格 - 至少对于这个特定的网格。请注意警告消息 — 一些观察到的计数非常小 （0），这可能会影响象限检验的准确性。回想一下，泊松分布仅描述了以整数计入的观察到的事件 - 其中我们的发生次数= 0（即未观察到），这可能是一个问题。我们还知道，还有其他各种问题可能会影响我们的象限分析，例如可修改的面单位问题。
+
+在新图中，我们可以看到每个象限的三个数字。左上角的数字是观察到的点数;右上方是泊松预期积分;底部值是残值（也称为Pearson残值），或（观察到 - 预期）/ Sqrt（预期）
+
+“So we can see that the indications are there is some spatial patterning (clustering) of Blue Plaques in Harrow — at least for this particular grid — at least for this particular grid. Note the warning message — some of the observed counts are very small (0) and this may affect the accuracy of the quadrant test. Recall that the Poisson distribution only describes observed occurrances that are counted in integers — where our occurrences = 0 (i.e. not observed), this can be an issue. We also know that there are various other problems that might affect our quadrat analysis, such as the modifiable areal unit problem.
+
+In the new plot, we can see three figures for each quadrant. The top-left figure is the observed count of points; the top-right is the Poisson expected number of points; the bottom value is the residual value (also known as Pearson residual value), or (Observed - Expected) / Sqrt(Expected).
+
+
+
+
+#  Ripley’s K
+解决象限分析局限性的一种方法是将观测到的点分布与泊松随机模型进行比较，以获得整个不同距离半径范围。这就是 Ripley 的 K 函数计算得出的。
+
+我们可以非常简单地使用函数的包对我们的数据进行Ripley的K测试。spatstatkest()
+
+```{r}
+K <- BluePlaquesSub.ppp %>% 
+  Kest(.,correction = "border") %>% 
+  plot
+```
+K的情节有许多值得解释的元素。首先，红色的Kpois（r）线是在完全空间随机性的泊松假设下每个距离窗口 （r） 的 K 的理论值。黑线是 K 的估计值，用于解释研究区域边缘的影响。
+如果 K 的值落在线上方，则数据似乎在该距离处聚类。如果 K 的值低于该线，则数据分散。从图表中，我们可以看到，直到大约1300米的距离，蓝色斑块似乎聚集在哈罗，然而，在大约1500米处，分布似乎是随机的，然后分散在大约1600到2100米之间。
+
+
+
+
+# Density-based spatial clustering of applications with noise: DBSCAN
+DBSCAN是一种流行的算法，用于根据点的密度来检测点的集群
+受欢迎的原因是可以检测非线性聚类
+2个参数。
+Epsilon (eps) = 搜索其他点的邻近区域的大小
+最小搜索点的数量（MinPts）
+如果一个点在邻域有>=MinPts，则定义为 "核心"。
+如果一个点在核心点的邻域内，但在它自己的邻域内有<MinPts，那么就定义为'边界'。
+
+
+
+```{r}
+library(raster)
+library(fpc)
+```
+
+我们现在将对我所在行政区的蓝色斑块进行DBSCAN分析，看看是否存在任何集群。
+We will now carry out a DBSCAN analysis of blue plaques in my borough to see if there are any clusters present.
+
+```{r}
+st_geometry(BoroughMap)
+```
+DBSCAN 要求您输入两个参数：1. Epsilon - 这是算法搜索聚类的半径 2.最小点数 - 这是应被视为聚类的最小点数
+
+根据之前Ripley的K分析结果，我们可以看到我们正在聚类到大约1200m的半径，图中最大的凸起在700m左右。因此，700米可能是一个很好的起点，我们将从搜索至少4个点的集群开始......
+1. Epsilon - this is the radius within which the algorithm with search for clusters 2. MinPts - this is the minimum number of points that should be considered a cluster
+
+
+
+```{r}
+#First extract the point from the spatial point data frame 
+BluePlaquesSubPoints <- BluePlaquesSub %>% 
+  coordinates(.) %>% 
+  as.data.frame()
+
+# run the dbscan analysis
+db <- BluePlaquesSubPoints %>% 
+  fpc::dbscan(.,eps=700,MinPts = 4)
+
+#plot it 
+plot(db,BluePlaquesSubPoints,main="DBSCSN Output",frame=F)
+plot(BoroughMap$geometry,add=T)
+```
+pacakge来根据情节中的"膝盖"找到合适的eps值...kNNdistplot()dbscan
+
+个点到 k 个邻居的平均距离，然后按升序绘制这些距离。膝盖是此值（与邻居的距离）增加的地方。请参
+
+```{r}
+library(dbscan)
+BluePlaquesSubPoints %>% 
+  dbscan::kNNdistplot(.,k=4)
+```
+
+```{r}
+library(ggplot2)
+
+```
+
+
+
+```{r}
+db
+```
+```{r}
+db$cluster
+```
+现在，我们可以将此集群成员身份信息添加回数据帧中
+
+
+```{r}
+BluePlaquesSubPoints <- BluePlaquesSubPoints %>% 
+  mutate(dbcluster=db$cluster)
+```
+
+```{r}
+chulls <- BluePlaquesSubPoints %>%
+  group_by(dbcluster) %>%
+  dplyr::mutate(hull = 1:n(),
+                hull = factor(hull, chull(coords.x1, coords.x2))) %>%
+  arrange(hull)
+```
+由于 0 实际上不是聚类（所有点都不在聚类中），因此将其从数据帧中删除
+
+```{r}
+chulls <- chulls %>% 
+  filter(dbcluster>=1)
+```
+
+
+```{r}
+dbplot <- ggplot(data=BluePlaquesSubPoints,
+                 aes(coords.x1,coords.x2,colour=dbcluster,fill=dbcluster))
+# add the points
+dbplot <- dbplot+geom_point()
+#now the convex hulls 
+dbplot <- dbplot+geom_point(data = chulls,
+                            aes(coords.x1,coords.x2,colour=dbcluster,fill=dbcluster))
+#add the points in 
+dbplot + theme_bw() + coord_equal()
+
+```
+```{r}
+HarrowWGSbb <- Harrow %>% 
+  st_transform(.,4326) %>% 
+  st_bbox()
+```
+
+
+现在将底图转换为英国国家格网
+
+```{r}
+library(OpenStreetMap)
+
+basemap <- OpenStreetMap::openmap(c(51.5549876,-0.4040502),c(51.6405356,-0.2671315),
+                                  zoom=NULL,
+                                  "stamen-toner")
+# convert the basemap to British National Grid
+basemap_bng <- openproj(basemap, projection="+init=epsg:27700")
+
+```
+现在，我们可以绘制带有集群的花哨地图
+
+```{r}
+#autoplot(basemap_bng) sometimes works
+autoplot.OpenStreetMap(basemap_bng)+ 
+  geom_point(data=BluePlaquesSubPoints, 
+             aes(coords.x1,coords.x2, 
+                 colour=dbcluster, 
+                 fill=dbcluster)) + 
+  geom_polygon(data = chulls, 
+               aes(coords.x1,coords.x2, 
+                   group=dbcluster,
+                   fill=dbcluster), 
+               alpha = 0.5) 
+```
+
+6.8点模式分析总结
+这是点模式分析部分的实践的结束。您已经了解了点模式分析的基础知识，该分析检查了伦敦自治市镇中蓝色斑块的分布。在这一点上，您可能希望尝试在不同的行政区（或整个城市）上运行类似的分析，并尝试使用一些输出 - 尽管您会发现，如果您尝试对那么多点运行分析，Ripley的K会很快下降）这就是您在其他上下文中或使用不同点数据时使用这些技术的方式......
+
+
+分析与莫兰的I，LISA和朋友的空间自相关
+在本节中，我们将使用各种空间自相关度量来探索空间参考连续观测的模式。空间自相关是衡量附近数据之间相似性的度量。查看阅读列表中的各种参考资料，以获取有关我们今天将要探讨的方法的更多信息。软件包的帮助文件中也有有用的链接，我们将在此处使用。spdep
+
+
+
+
+# load the data
+```{r}
+library(here)
+library(janitor)
+library(dplyr)
+LondonWards <- st_read(here::here("prac6_data","London-wards-2018_ESRI", "London_Ward.shp"))
+
+```
+
+```{r}
+LondonWardsMerged <- st_read(here::here("prac6_data",
+                                  "ESRI",
+                                  "London_Ward_CityMerged.shp")) %>% 
+  st_transform(.,27700)
+```
+
+
+```{r}
+library(janitor)
+#install.packages('clean_names',repos='http://cran.us.r-project.org')
+WardData <- read_csv("https://data.london.gov.uk/download/ward-profiles-and-atlas/772d2d64-e8c6-46cb-86f9-e52b4c7851bc/ward-profiles-excel-version.csv",locale = locale(encoding = "latin1"),na = c("NA", "n/a")) %>%
+  clean_names()
+
+
+LondonWardsMerged <- LondonWardsMerged %>% 
+  left_join(WardData, 
+            by = c("GSS_CODE" = "new_code"))%>%
+  dplyr::distinct(GSS_CODE, .keep_all = T)%>%
+  dplyr::select(GSS_CODE, ward_name, average_gcse_capped_point_scores_2014)
+```
+#have a look to check that it's 
+#in the right projection
+
+```{r}
+st_crs(LondonWardsMerged)
+```
+
+```{r}
+tmap_mode("view")
+tm_shape(LondonWardsMerged)+
+  tm_polygons(col=NA,alpha=0.5)+
+  tm_shape(BluePlaques)+
+  tm_dots(col = "blue")
+```
+
+```{r}
+
+summary(BluePlaques)
+```
+
+```{r}
+BluePlaquesSub <- BluePlaques[LondonWardsMerged,]
+
+tm_shape(LondonWardsMerged) +
+  tm_polygons(col = NA, alpha = 0.5) +
+tm_shape(BluePlaquesSub) +
+  tm_dots(col = "blue")
+```
+
+```{r}
+library(sf)
+points_sf_joined <- LondonWardsMerged %>%
+  st_join(BluePlaquesSub) %>%
+  add_count(ward_name) %>% 
+  janitor::clean_names() %>%#calculate area
+  mutate(area=st_area(.)) %>%
+  mutate(density=n/area) %>%
+  dplyr::select(density,ward_name,n,gss_code,n,average_gcse_capped_point_scores_2014)
+  
+```
+
+如何快速分区统计图，看看我们是如何相处的......
+How about a quick choropleth map to see how we are getting on…
+```{r}
+points_sf_joined <- points_sf_joined %>% 
+  group_by(gss_code) %>% 
+  summarise(density=first(density),
+            wardname=first(ward_name),
+            plaquecount=first(n))
+```
+
+```{r}
+tm_shape(points_sf_joined) +
+    tm_polygons("density",
+        style="jenks",
+        palette="PuOr",
+        midpoint=NA,
+        popup.vars=c("wardname", "density"),
+        title="Blue Plaque Density")
+```
+所以，从地图上看，我们似乎在伦敦市中心可能有一些蓝色斑块的聚集，所以让我们用莫兰的I和其他一些统计数据来检查一下。
+
+在能够计算莫兰的I和任何类似的统计数据之前，我们需要首先定义一个 W空间权重矩阵
+
+
+
+```{r}
+library(spdep)
+```
+#首先计算伦敦所有选区的中心点
+```{r}
+#First calculate the centroids of all Wards in London
+
+coordsW <- points_sf_joined%>%
+  st_centroid()%>%
+  st_geometry()
+  
+plot(coordsW,axes=TRUE)
+```
+
+```{r}
+#create a neighbours list
+LWard_nb <- points_sf_joined %>%
+  poly2nb(., queen=T)
+```
+
+```{r}
+summary(LWard_nb)
+```
+
+
+```{r}
+#plot them
+plot(LWard_nb, st_geometry(coordsW), col="red")
+#add a map underneath
+plot(points_sf_joined$geometry, add=T)
+```
+
+```{r}
+#create a spatial weights matrix from these weights
+Lward.lw <- LWard_nb %>%
+  nb2mat(., style="B")
+
+sum(Lward.lw)
+```
+```{r}
+Lward.lw <- LWard_nb %>%
+  nb2listw(., style="C")
+```
+
+```{r}
+I_LWard_Global_Density <- points_sf_joined %>%
+  pull(density) %>%
+  as.vector()%>%
+  moran.test(., Lward.lw)
+
+I_LWard_Global_Density
+```
+```{r}
+C_LWard_Global_Density <- 
+  points_sf_joined %>%
+  pull(density) %>%
+  as.vector()%>%
+  geary.test(., Lward.lw)
+
+C_LWard_Global_Density
+```
+
+```{r}
+G_LWard_Global_Density <- 
+  points_sf_joined %>%
+  pull(density) %>%
+  as.vector()%>%
+  globalG.test(., Lward.lw)
+
+G_LWard_Global_Density
+```
+```{r}
+#use the localmoran function to generate I for each ward in the city
+
+I_LWard_Local_count <- points_sf_joined %>%
+  pull(plaquecount) %>%
+  as.vector()%>%
+  localmoran(., Lward.lw)%>%
+  as_tibble()
+
+I_LWard_Local_Density <- points_sf_joined %>%
+  pull(density) %>%
+  as.vector()%>%
+  localmoran(., Lward.lw)%>%
+  as_tibble()
+
+#what does the output (the localMoran object) look like?
+slice_head(I_LWard_Local_Density, n=5)
+```
+
+```{r}
+points_sf_joined <- points_sf_joined %>%
+  mutate(plaque_count_I = as.numeric(I_LWard_Local_count$Ii))%>%
+  mutate(plaque_count_Iz =as.numeric(I_LWard_Local_count$Z.Ii))%>%
+  mutate(density_I =as.numeric(I_LWard_Local_Density$Ii))%>%
+  mutate(density_Iz =as.numeric(I_LWard_Local_Density$Z.Ii))
+```
+
+```{r}
+breaks1<-c(-1000,-2.58,-1.96,-1.65,1.65,1.96,2.58,1000)
+
+```
+
+```{r}
+MoranColours<- rev(brewer.pal(8, "RdGy"))
+
+```
+
+```{r}
+tm_shape(points_sf_joined) +
+    tm_polygons("plaque_count_Iz",
+        style="fixed",
+        breaks=breaks1,
+        palette=MoranColours,
+        midpoint=NA,
+        title="Local Moran's I, Blue Plaques in London")
+```
+这幅地图显示了伦敦市中心得分相对较高的一些区域，表示与具有大量蓝色斑块的其他地区相邻的具有大量蓝色斑块的区域。
+
+对热点和冷点的静态？
+
+
+```{r}
+Gi_LWard_Local_Density <- points_sf_joined %>%
+  pull(density) %>%
+  as.vector()%>%
+  localG(., Lward.lw)
+
+head(Gi_LWard_Local_Density)
+```
+
+
+```{r}
+points_sf_joined <- points_sf_joined %>%
+  mutate(density_G = as.numeric(Gi_LWard_Local_Density))
+```
+
+```{r}
+GIColours<- rev(brewer.pal(8, "RdBu"))
+
+#now plot on an interactive map
+tm_shape(points_sf_joined) +
+    tm_polygons("density_G",
+        style="fixed",
+        breaks=breaks1,
+        palette=GIColours,
+        midpoint=NA,
+        title="Gi*, Blue Plaques in London")
+```
+
+```{r}
+#use head to see what other variables are in the data file
+
+slice_head(points_sf_joined, n=2)
+
+```
+
+
+```{r}
+Datatypelist <- LondonWardsMerged %>% 
+  st_drop_geometry()%>%
+  summarise_all(class) %>%
+  pivot_longer(everything(), 
+               names_to="All_variables", 
+               values_to="Variable_class")
+
+Datatypelist
+```
+
+
+
+
+```{r}
+I_LWard_Local_GCSE <- LondonWardsMerged %>%
+  arrange(GSS_CODE)%>%
+  pull(average_gcse_capped_point_scores_2014) %>%
+  as.vector()%>%
+  localmoran(., Lward.lw)%>%
+  as_tibble()
+
+points_sf_joined <- points_sf_joined %>%
+  arrange(gss_code)%>%
+  mutate(GCSE_LocIz = as.numeric(I_LWard_Local_GCSE$Z.Ii))
+
+
+tm_shape(points_sf_joined) +
+    tm_polygons("GCSE_LocIz",
+        style="fixed",
+        breaks=breaks1,
+        palette=MoranColours,
+        midpoint=NA,
+        title="Local Moran's I, GCSE Scores")
+```
+
+
+
+```{r}
+G_LWard_Local_GCSE <- LondonWardsMerged %>%
+  dplyr::arrange(GSS_CODE)%>%
+  dplyr::pull(average_gcse_capped_point_scores_2014) %>%
+  as.vector()%>%
+  localG(., Lward.lw)
+
+points_sf_joined <- points_sf_joined %>%
+  dplyr::arrange(gss_code)%>%
+  dplyr::mutate(GCSE_LocGiz = as.numeric(G_LWard_Local_GCSE))
+
+tm_shape(points_sf_joined) +
+    tm_polygons("GCSE_LocGiz",
+        style="fixed",
+        breaks=breaks1,
+        palette=GIColours,
+        midpoint=NA,
+        title="Gi*, GCSE Scores")
+```
+
+
+11
